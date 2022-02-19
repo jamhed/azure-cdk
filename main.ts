@@ -2,20 +2,19 @@ import { AzurermProvider, DataAzurermClientConfig, KubernetesCluster, Kubernetes
 import { App, Fn, TerraformStack } from "cdktf"
 import { Construct } from "constructs"
 import * as yaml from "js-yaml"
-import { HelmProvider, Release } from "./.gen/providers/helm"
+import { HelmProvider, HelmProviderKubernetes, Release } from "./.gen/providers/helm"
 
-export interface ClusterProps {
+interface ClusterProps {
   region: string
 }
 
-export interface ChartsProps {
+interface ChartsProps {
   cluster: Cluster
 }
 
-export class Cluster extends TerraformStack {
+class Cluster extends TerraformStack {
   aks: KubernetesCluster
   resourceGroup: ResourceGroup
-  config: KubernetesClusterKubeConfig
   constructor(scope: Construct, readonly name: string, readonly props: ClusterProps) {
     super(scope, name)
     new AzurermProvider(this, "azure", { features: {} })
@@ -45,7 +44,17 @@ export class Cluster extends TerraformStack {
         azurePolicy: { enabled: true }
       }
     })
-    this.config = this.aks.kubeConfig("0")
+  }
+}
+
+function makeKubeConfig(config: KubernetesClusterKubeConfig): HelmProviderKubernetes {
+  return {
+    host: config.host,
+    clientCertificate: Fn.base64decode(config.clientCertificate),
+    clientKey: Fn.base64decode(config.clientKey),
+    clusterCaCertificate: Fn.base64decode(config.clusterCaCertificate),
+    username: config.username,
+    password: config.password
   }
 }
 
@@ -53,14 +62,7 @@ class Charts extends TerraformStack {
   constructor(scope: Construct, readonly name: string, readonly props: ChartsProps) {
     super(scope, name)
     new HelmProvider(this, "helm", {
-      kubernetes: {
-        host: props.cluster.config.host,
-        clientCertificate: Fn.base64decode(props.cluster.config.clientCertificate),
-        clientKey: Fn.base64decode(props.cluster.config.clientKey),
-        clusterCaCertificate: Fn.base64decode(props.cluster.config.clusterCaCertificate),
-        username: props.cluster.config.username,
-        password: props.cluster.config.password
-      }
+      kubernetes: makeKubeConfig(props.cluster.aks.kubeConfig("0"))
     })
     new AzurermProvider(this, "azure", { features: {} })
     this.addExternalDns()

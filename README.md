@@ -81,7 +81,7 @@ app.synth()
 
 Please see the complete source code [here](https://github.com/jamhed/azure-cdk/blob/main/main.ts) and [parameters](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster) guide.
 
-Now we can deploy the cluster:
+Now we can deploy the cluster named "cluster":
 
 ```sh
 cdktf deploy cluster
@@ -91,10 +91,129 @@ cdktf deploy cluster
 
 ## Adding a helm chart to cluster
 
-## Next steps
+Now we have a cluster deployed to Azure, let's add a Helm chart for [External DNS](https://github.com/kubernetes-sigs/external-dns) to it, for simplicity, in the same `main.ts` file:
 
-1. Publish as NPM library
-2. Set up CI/CD pipeline
+```typescript
+import * as yaml from "js-yaml"
+import { HelmProvider, HelmProviderKubernetes, Release } from "./.gen/providers/helm"
+
+interface ChartsProps {
+  cluster: Cluster
+}
+
+class Charts extends TerraformStack {
+  constructor(scope: Construct, readonly name: string, readonly props: ChartsProps) {
+    super(scope, name)
+    new HelmProvider(this, "helm", {
+      kubernetes: props.cluster.aks.kubeConfig("0")
+    })
+    new AzurermProvider(this, "azure", { features: {} })
+  }
+}
+```
+
+HelmProvider requires Kubernetes cluster configuration data, and we're providing it by referencing a cluster defined in another stack. Unfortunately, some conversion is required, so let's define a function `makeKubeConfig` and do the conversion there:
+
+```typescript
+import { App, Fn, TerraformStack } from "cdktf"
+
+function makeKubeConfig(config: KubernetesClusterKubeConfig): HelmProviderKubernetes {
+  return {
+    host: config.host,
+    clientCertificate: Fn.base64decode(config.clientCertificate),
+    clientKey: Fn.base64decode(config.clientKey),
+    clusterCaCertificate: Fn.base64decode(config.clusterCaCertificate),
+    username: config.username,
+    password: config.password
+  }
+}
+
+class Charts extends TerraformStack {
+  constructor(scope: Construct, readonly name: string, readonly props: ChartsProps) {
+    super(scope, name)
+    new HelmProvider(this, "helm", {
+      kubernetes: makeKubeConfig(props.cluster.aks.kubeConfig("0"))
+    })
+    new AzurermProvider(this, "azure", { features: {} })
+  }
+}
+```
+
+Here we use built-in Terraform function `base64decode` to decode values from base64 format to raw values, as expected by the Helm provider.
+
+Now let's add chart to the stack:
+
+```typescript
+class Charts extends TerraformStack {
+  constructor(scope: Construct, readonly name: string, readonly props: ChartsProps) {
+    super(scope, name)
+    new HelmProvider(this, "helm", {
+      kubernetes: makeKubeConfig(props.cluster.aks.kubeConfig("0"))
+    })
+    new AzurermProvider(this, "azure", { features: {} })
+  }
+  addChart(name: string, version: string, repo: string, values: unknown = {}): Release {
+    return new Release(this, name, {
+      name: name,
+      namespace: name,
+      repository: repo,
+      chart: name,
+      version: version,
+      createNamespace: true,
+      values: [yaml.dump(values)]
+    })
+  }
+  addExternalDns(): Charts {
+    const client = new DataAzurermClientConfig(this, "client")
+    this.addChart("external-dns", "6.1.2", "https://charts.bitnami.com/bitnami", {
+      provider: "azure",
+      image: {
+        tag: "0.9.0", // 0.10.0 doesn't work with useManagedIdentityExtension
+      },
+      azure: {
+        resourceGroup: this.props.cluster.resourceGroup.name,
+        tenantId: client.tenantId,
+        subscriptionId: client.subscriptionId,
+        useManagedIdentityExtension: true,
+        userAssignedIdentityID: this.props.cluster.aks.kubeletIdentity.clientId
+      },
+      logLevel: "info",
+      txtOwnerId: "external-dns",
+      sources: ['ingress'],
+    })
+    return this
+  }
+}
+
+const app = new App()
+const cluster = new Cluster(app, "cluster", { region: "eastus" })
+new Charts(app, "charts", { cluster })
+app.synth()
+```
+
+Here we use `js-yaml` library to provide values to Helm chart in place by converting from json to yaml. Let's deploy the cluster stack again:
+
+```sh
+cdktf deploy cluster --auto-approve
+```
+
+[![asciicast](https://asciinema.org/a/FP2pPxBcRTRXjcwq8nUOCbVFM.svg)](https://asciinema.org/a/FP2pPxBcRTRXjcwq8nUOCbVFM)
+
+Now we have cross-referenced stack parameters automatically exported by CDK TF, so let's deploy charts stack:
+
+```sh
+cdktf deploy charts --auto-approve
+```
+
+[![asciicast](https://asciinema.org/a/XkEQEBH0cqKLyUw20OjzBmVj5.svg)](https://asciinema.org/a/XkEQEBH0cqKLyUw20OjzBmVj5)
+
+## Conclusion and next steps
+
+So now we have two CDK TF stacks defined, `cluster` and `charts`, and can work on them independently, however, the code we have so far is not ideal, as all of it is in just one file.
+
+What if we want to deploy multiple Kubernetes clusters, but configured the same way, like having external dns chart always installed?
+
+To accomplish this we'll define a custom CDK TF construct as a Typescript library, and reuse it using standard nodejs package manager npm, in the next article.
 
 ## References
 
